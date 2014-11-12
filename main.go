@@ -1,70 +1,106 @@
 package main
 
 import (
-	//"fmt"
+	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
+	"os"
+
 	"github.com/PuerkitoBio/goquery"
+	"github.com/mxk/go-sqlite/sqlite3"
 )
 
-func GetDocument(url string) *goquery.Document {
-	doc, err := goquery.NewDocument(url) 
+func logFatal(err error) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+var baseUrl = "http://www.thestory.org"
+var conn = GetSqliteConn("go-get-the-story.db")
+
+func GetUrl(path string) string {
+	return baseUrl + path
+}
+
+func GetFile(url string) []byte {
+	res, err := http.Get(url)
+	logFatal(err)
+	defer res.Body.Close()
+	file, err := ioutil.ReadAll(res.Body)
+	logFatal(err)
+	return file
+}
+
+func GetDocument(url string) *goquery.Document {
+	doc, err := goquery.NewDocument(url)
+	logFatal(err)
 	return doc
 }
 
-type Piece struct {
-	url string
-	title string
-	show *Show
+func GetSqliteConn(db string) *sqlite3.Conn {
+	conn, err := sqlite3.Open(db)
+	logFatal(err)
+	return conn
 }
 
-type Show struct {
-	url string
-	doc *goquery.Document
+func InitDb(conn *sqlite3.Conn) {
+	conn.Exec(`CREATE TABLE IF NOT EXISTS shows(
+		id         INTEGER PRIMARY KEY,
+		path       NOT NULL,
+		title      NOT NULL,
+		date       NOT NULL
+	);`)
+
+	conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS showPath ON shows(path);`)
+
+	conn.Exec(`CREATE TABLE IF NOT EXISTS segments(
+		id         INTEGER PRIMARY KEY,
+		path       NOT NULL,
+		title      NOT NULL,
+		date       NOT NULL,
+		show_id  
+	);`)
+
+	conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS segmentPath ON segments(path);`)
 }
 
-func GetShow(url string) *Show {
-	doc := GetDocument(url)
-	show := Show{
-		url: url,
-		doc: doc,
-	}
-	return &show
-}
+func Crawl(path string) {
+	page := ListPage{path: path}
+	page.Scrape()
 
-func ParsePieceSelection(s *goquery.Selection) *Piece {
-	showHead := s.Find(".views-group-header")
-	if (showHead.Length() != 0) {
-		url := showHead.Find("")
-		show := &Show{
-			url: url,
+	for _, segment := range page.segments {
+		if segment.show != nil {
+			show := segment.show
+			if !show.Exists(conn) {
+				show.Scrape()
+				show.Save(conn)
+			}
 		}
+		segment.Scrape()
+		segment.Save(conn)
 	}
-	piece := &Piece{
-		title: s.Find(".node-title").Text(),
+
+	next := page.Next()
+	if next != "" {
+		Crawl(next)
 	}
-	return piece
-}
-
-func DocPieces(doc *goquery.Document) []*Piece {
-	groups := doc.Find(".view-stories .views-group")
-	pieces := make([]*Piece, groups.Length())
-	groups.Each(func(i int, s *goquery.Selection) {
-		pieces[i] = ParsePieceSelection(s)
-  	})
-	return pieces
-}
-
-func Scrape() []*Piece {
-	url := "http://www.thestory.org/stories"
-	pieces := DocPieces(GetDocument(url))
-	return pieces
 }
 
 func main() {
-	Scrape()
+	fmt.Println("go-get-the-story\n")
+
+	InitDb(conn)
+
+	var path string
+	if len(os.Args) > 1 {
+		path = os.Args[1]
+	} else {
+		path = "/stories"
+	}
+
+	Crawl(path)
 }
 
 func doLog() {
